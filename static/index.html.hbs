@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Blog</title>
+	<link rel="stylesheet" href="/index.css" />
+</head>
+
+<body>
+	{{> header}}
+	<main>
+		<h2 id="heading-articles">Articles</h2>
+		<ul id="articles" aria-labelledby="heading-articles">
+			<template id="new-article">
+				<li>
+					<a href="/article?file="></a>
+				</li>
+			</template>
+		</ul>
+	</main>
+
+	<script>
+		/**@type {HTMLUListElement}*/
+		const ARTICLES = document.querySelector("ul#articles");
+		/**@type {HTMLTemplateElement}*/
+		const NEW_ARTICLE = document.querySelector("template#new-article");
+
+		void fetch("/api/article")
+			.then(res => res.json())
+			.then((/**@type { {file: string, title: string, content: string}[] }*/ articles) => Promise.all(articles.map(article => {
+				const clone = NEW_ARTICLE.content.cloneNode(true);
+				((/**@type {HTMLAnchorElement}*/ a) => {
+					a.innerHTML = article.title; //NOTE: XSS vulnerable
+					a.href += article.file;
+				})(clone.querySelector("a"));
+				void ARTICLES.appendChild(clone);
+			})))
+			.catch(console.error);
+	</script>
+</body>
+
+</html>

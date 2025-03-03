@@ -1,0 +1,20 @@
+[package]
+name = "vulnerable_dummy_website"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-recursion = "0"
+base64 = "0"
+either = "1"
+futures = "0"
+rand = { version = "0", features = ["getrandom"] }
+regex = "1"
+rocket = { version = "0.5.0-rc.1", features = ["secrets", "json"] }
+rocket_dyn_templates = { version = "0.1.0-rc.1", features = ["handlebars"] }
+rocket_sync_db_pools = { version = "0.1.0-rc.1", features = ["sqlite_pool"] }
+serde = "1"
+serde_json = "1"
+sha2 = "0"
+tokio = { version = "1", features = ["fs"] }

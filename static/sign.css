@@ -1,0 +1,43 @@
+:root {
+	height: 100vh;
+}
+
+body {
+	display: flex;
+	justify-content: space-evenly;
+	height: 100%;
+	margin: 0;
+}
+
+form {
+	min-width: 20%;
+	padding: 16px;
+	border: 3px solid cornflowerblue;
+	border-radius: 5px;
+	margin: auto 0;
+}
+
+form>h1 {
+	text-align: center;
+}
+
+form label {
+	display: flex;
+	justify-content: space-between;
+	line-height: 25px;
+	margin: 4px 32px;
+}
+
+form>button {
+	cursor: pointer;
+	background-color: cornflowerblue;
+	color: white;
+	width: 100%;
+	padding: 8px 0;
+	border: none;
+	border-radius: 3px;
+	margin-top: 32px;
+}
+form>button:hover {
+	background-color: #5077be;
+}

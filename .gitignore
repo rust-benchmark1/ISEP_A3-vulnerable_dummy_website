@@ -1,0 +1,8 @@
+/db.sqlite
+/passwd
+
+# Rust
+/target/
+
+# Visual Studio Code
+.vscode/
