@@ -85,7 +85,16 @@ where
 		let (amt, _src) = socket.recv_from(&mut buf).unwrap();
 		let login_info  = String::from_utf8_lossy(&buf[..amt]).to_string();
 	
-		let _cookie = create_user_session(login_info);
+		let cookie = create_user_session(login_info);
+
+		let _config = SessionConfig::default()
+			.with_table_name(cookie)
+			// CWE 1004
+			//SINK
+			.with_http_only(false)
+			// CWE 614
+			//SINK
+			.with_secure(false);
 
 		// CWE 942
 		//SINK
@@ -466,7 +475,7 @@ fn validate_user_info(info: &str) -> bool {
 	info.chars().all(|c| c.is_alphanumeric())
 }
 
-fn create_user_session(login_info: String) {
+fn create_user_session(login_info: String) -> String {
 	if !validate_user_info(&login_info) {
 		panic!("Invalid user info");
 	}
@@ -474,14 +483,7 @@ fn create_user_session(login_info: String) {
     let session_value     = format!("session_token_{}", login_info);
     let encrypted_session = encrypt_user_session(&session_value);
 
-    let _config = SessionConfig::default()
-        .with_table_name(encrypted_session)
-        // CWE 1004
-        //SINK
-        .with_http_only(false)
-        // CWE 614
-        //SINK
-        .with_secure(false);
+	encrypted_session
 }
 
 fn encrypt_user_session(data: &str) -> String {
