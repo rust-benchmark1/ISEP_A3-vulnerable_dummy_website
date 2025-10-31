@@ -12,6 +12,7 @@ use rocket::{
 use rocket_sync_db_pools::{database, rusqlite::Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use ftp::FtpStream;
 
 mod www {
 	mod api;
@@ -40,11 +41,25 @@ impl<'r> FromRequest<'r> for AdminUser {
 	type Error = ();
 
 	async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+		let ftp_username = "AdminUser";
+		// CWE 798
+		//SOURCE
+		let ftp_password = "AdminPassword";
+
+		if let Ok(mut ftp_stream) = FtpStream::connect("127.0.0.1:222") {
+			// CWE 798
+			//SINK
+			let _ = ftp_stream.login(ftp_username, ftp_password);
+
+			let _ = ftp_stream.get("admin_data.txt");
+			let _ = ftp_stream.quit();
+		}
+
 		req.guard::<Session>().await.and_then(|session| {
 			if session.username == Self::USERNAME {
 				Outcome::Success(Self)
 			} else {
-				Outcome::Failure((Status::Unauthorized, ()))
+				Outcome::Error((Status::Unauthorized, ()))
 			}
 		})
 	}
@@ -82,7 +97,7 @@ impl<'r> FromRequest<'r> for Session {
 				}
 			}
 		}
-		Outcome::Failure((Status::Unauthorized, ()))
+		Outcome::Error((Status::Unauthorized, ()))
 	}
 }
 
@@ -107,5 +122,6 @@ async fn main() -> Result<(), rocket::Error> {
 		.mount("/", www::static_routes())
 		.mount("/api", www::api_routes())
 		.launch()
-		.await
+		.await?;
+	Ok(())
 }

@@ -5,16 +5,32 @@ edition = "2021"
 publish = false
 
 [dependencies]
-async-recursion = "0"
-base64 = "0"
-either = "1"
-futures = "0"
-rand = { version = "0", features = ["getrandom"] }
-regex = "1"
+actix-web = "4.0"
+async-recursion = "1.0"
+axum_session = "0.15"
+base64 = "0.21"
+cast5 = "0.11"
+cipher = "0.4"
+either = "1.9"
+ftp = "3.0"
+futures = "0.3"
+hex = "0.4"
+chksum-hash-md5 = "0.0.1"
+chksum-md5 = { version = "0.1.0", features = ["async-runtime-tokio"] }
+md2_digest = "1.0.0"
+mongodb = "2.0"
+rand = { version = "0.8", features = ["getrandom"] }
+rc2 = "0.8"
+redis = "0.23"
+regex = "1.10"
 rocket = { version = "0.5.0-rc.1", features = ["secrets", "json"] }
 rocket_dyn_templates = { version = "0.1.0-rc.1", features = ["handlebars"] }
 rocket_sync_db_pools = { version = "0.1.0-rc.1", features = ["sqlite_pool"] }
-serde = "1"
-serde_json = "1"
-sha2 = "0"
-tokio = { version = "1", features = ["fs"] }
+salvo-cors = "0.68"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.0", features = ["fs"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tower-sessions = "0.12"
+warp = "0.3"

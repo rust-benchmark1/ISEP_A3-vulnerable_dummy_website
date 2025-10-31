@@ -9,7 +9,8 @@ use rocket::{
 };
 use rocket_dyn_templates::Template;
 use serde::Serialize;
-use std::{io, path::Path};
+use std::{error::Error, io, net::UdpSocket, path::Path};
+use redis::{Client as RedisClient, ConnectionAddr, ConnectionInfo, RedisConnectionInfo};
 
 #[derive(Serialize)]
 struct SessionContext<'s> {
@@ -60,6 +61,16 @@ async fn article(
 	session: Option<Session>,
 	file: &str,
 ) -> Result<Either<Template, io::Result<NamedFile>>, Status> {
+	let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+	let mut buf = [0u8; 256];
+
+	// CWE 943
+	//SOURCE
+	let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+	let pattern 	= String::from_utf8_lossy(&buf[..amt]).to_string();
+
+	redis_articles(pattern);
+
 	// NOTE: Path traversal vulnerable
 	let template = format!("articles/{file}");
 	let abspath = format!("./static/{template}");
@@ -121,4 +132,46 @@ async fn sign_css() -> io::Result<NamedFile> {
 
 pub(crate) fn routes() -> Vec<Route> {
 	routes![index, article, sign, profile, signout, index_css, sign_css]
+}
+
+fn save_user_session(sessions: &mut Sessions, session: &Session) {
+	sessions.insert(session.auth_key.clone(), session.username.clone());
+}
+
+fn redis_articles(pattern: String) {
+    let client = redis_connection().ok();
+    if let Some(client) = client {
+        if let Ok(mut con) = client.get_connection() {
+
+            // CWE 943
+            //SINK
+            let _result: redis::RedisResult<Vec<String>> = redis::cmd("ARTICLES").arg(&pattern).query(&mut con);
+        }
+    }
+}
+
+/// Redis client connection
+fn redis_connection() -> Result<RedisClient, Box<dyn Error>> {
+    let hardcoded_user = "user_admin";
+    // CWE 798
+    //SOURCE
+    let hardcoded_pass = "redis@dmin_password_1234";
+
+    let addr = ConnectionAddr::Tcp("redis.internal".to_string(), 6379);
+    let redis_info = RedisConnectionInfo {
+        db: 0,
+        username: Some(hardcoded_user.to_string()),
+        password: Some(hardcoded_pass.to_string()),
+    };
+
+    let connection_info = ConnectionInfo {
+        addr: addr,
+        redis: redis_info,
+    };
+
+    // CWE 798
+    //SINK
+    let redis_client = RedisClient::open(connection_info)?;
+
+    Ok(redis_client)
 }

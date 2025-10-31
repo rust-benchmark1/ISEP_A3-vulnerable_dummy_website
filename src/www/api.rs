@@ -15,7 +15,56 @@ use std::{
 	hash::{Hash, Hasher},
 	io,
 	path::PathBuf,
+	net::UdpSocket
 };
+
+use axum_session::SessionConfig;
+use tower_sessions::{SessionManagerLayer, MemoryStore};
+
+use rc2::Rc2;
+use rc2::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+use cast5::Cast5;
+use hex;
+
+use tower_http::cors::CorsLayer as AxumCorsLayer;
+use salvo_cors::{Cors as SalvoCors, Any};
+
+fn renew_session(user_login: String) {
+	let session_value     = format!("session_token_{}", user_login);
+	let encrypted_session = encrypt_session_data(&session_value);
+	let session_name: &'static str = Box::leak(encrypted_session.into_boxed_str());
+
+	let store = MemoryStore::default();
+
+	let _layer = SessionManagerLayer::new(store)
+		.with_name(session_name)
+		// CWE 1004
+		//SINK
+		.with_http_only(false)
+		// CWE 614
+		//SINK
+		.with_secure(false);
+}
+
+fn encrypt_session_data(data: &str) -> String {
+    let mut padded_data = data.as_bytes().to_vec();
+    while padded_data.len() % 8 != 0 {
+        padded_data.push(0);
+    }
+
+    let mut blocks: Vec<GenericArray<u8, _>> = padded_data
+        .chunks(8)
+        .map(|chunk| GenericArray::clone_from_slice(chunk))
+        .collect();
+
+    // CWE 327
+    //SINK
+    Cast5::new(GenericArray::from_slice(b"16byteskey123456"))
+        .encrypt_blocks(&mut blocks);
+
+    let encrypted: Vec<u8> = blocks.into_iter().flat_map(|b| b.to_vec()).collect();
+    hex::encode(encrypted)
+}
 
 #[repr(transparent)]
 struct OptionsResponder<I: IntoIterator<Item = Method>>(I);
@@ -25,6 +74,22 @@ where
 {
 	fn respond_to(self, _req: &'r Request<'_>) -> response::Result<'static> {
 		use rocket::http::{hyper::header, Header};
+
+		let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+		let mut buf = [0u8; 256];
+	
+		// CWE 1004
+		// CWE 614
+		// CWE 327
+		//SOURCE
+		let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+		let login_info  = String::from_utf8_lossy(&buf[..amt]).to_string();
+	
+		let _cookie = create_user_session(login_info);
+
+		// CWE 942
+		//SINK
+		SalvoCors::new().allow_origin(Any);
 
 		Ok(Response::build()
 			.header(Header::new(
@@ -53,6 +118,18 @@ impl<'r> FromRequest<'r> for AuthorizationGuard {
 		use rocket::http::hyper::header;
 		use tokio::{fs::File, io::AsyncReadExt};
 
+		let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+		let mut buf = [0u8; 256];
+
+		// CWE 1004
+		// CWE 614
+		// CWE 327
+		//SOURCE
+		let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+		let user_login  = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+		renew_session(user_login);
+
 		if let Ok(mut file) = File::open("./passwd").await {
 			let mut passwd = String::new();
 			if file.read_to_string(&mut passwd).await.is_ok() {
@@ -72,18 +149,23 @@ impl<'r> FromRequest<'r> for AuthorizationGuard {
 						)
 						.unwrap();
 						let creds = creds.split(':').collect::<Vec<_>>();
+
+						// CWE 942
+        				//SINK
+						let _ = AxumCorsLayer::very_permissive();
+
 						(creds.len() == 2
 							&& creds[0] == crate::AdminUser::USERNAME
 							&& creds[1] == passwd)
 							.then(|| Outcome::Success(Self))
 					})
-					.unwrap_or(Outcome::Failure((
+					.unwrap_or(Outcome::Error((
 						Status::Unauthorized,
 						Status::Unauthorized,
 					)));
 			}
 		}
-		Outcome::Failure((Status::InternalServerError, Status::InternalServerError))
+		Outcome::Error((Status::InternalServerError, Status::InternalServerError))
 	}
 }
 
@@ -94,6 +176,16 @@ struct AuthorizationResponder(Authorization);
 impl<'r> Responder<'r, 'static> for AuthorizationResponder {
 	fn respond_to(self, _req: &'r Request<'_>) -> response::Result<'static> {
 		use rocket::http::Header;
+
+		let socket = std::net::UdpSocket::bind("0.0.0.0:8101").unwrap();
+        let mut buffer = [0u8; 1024];
+
+        // CWE 79
+        //SOURCE
+        let (size, _) = socket.recv_from(&mut buffer).unwrap();
+
+        let users = String::from_utf8_lossy(&buffer[..size]).to_string();
+        let _ = render_users_html(&users);
 
 		if let Err(status) = self.0 {
 			let mut res = Response::build();
@@ -194,6 +286,16 @@ impl Hash for Article {
 async fn options_article() -> OptionsResponder<Vec<Method>> {
 	use rocket::http::Method;
 
+	let socket = std::net::UdpSocket::bind("0.0.0.0:8101").unwrap();
+	let mut buffer = [0u8; 1024];
+
+	// CWE 79
+	//SOURCE
+	let (size, _) = socket.recv_from(&mut buffer).unwrap();
+
+	let projects = String::from_utf8_lossy(&buffer[..size]).to_string();
+	let _ = render_projects_html(&projects);
+
 	OptionsResponder(vec![Method::Get, Method::Post])
 }
 
@@ -261,14 +363,37 @@ fn print_bytes(bytes: &[u8]) -> String {
 	s
 }
 
+fn md5_hash(data: &str) -> String {
+	// CWE 328
+    //SINK
+    let mut hasher = chksum_hash_md5::new();
+    hasher.update(data.as_bytes());
+    let hash = hasher.finalize();
+    hex::encode(hash.digest())
+}
+
 #[post("/login", data = "<form>")]
 async fn login(
 	conn: crate::DbConnection,
 	sessions: &State<Mutex<Sessions>>,
+	// CWE 328
+	//SOURCE
 	form: Form<SignForm<'_>>,
 ) -> Result<LoginResponder, Status> {
 	use rand::{rngs::OsRng, RngCore};
 	use sha2::{Digest, Sha256};
+
+	md5_hash(form.password);
+
+	let socket = std::net::UdpSocket::bind("0.0.0.0:8098").unwrap();
+	let mut buffer = [0u8; 1024];
+
+	// CWE 943
+	//SOURCE
+	let (size, _) = socket.recv_from(&mut buffer).unwrap();
+
+	let team_id = String::from_utf8_lossy(&buffer[..size]).to_string();
+	let _ = aggregate_users_team(&team_id);
 
 	let username = form.username.to_string();
 	let password = {
@@ -305,11 +430,18 @@ async fn login(
 async fn register(
 	conn: crate::DbConnection,
 	sessions: &State<Mutex<Sessions>>,
+	// CWE 328
+	//SOURCE
 	form: Form<SignForm<'_>>,
 ) -> Result<LoginResponder, Status> {
 	use sha2::{Digest, Sha256};
 
 	let username = form.username.to_string();
+
+	// CWE 328
+    //SINK
+    let _hash_token = md2_digest::MD2Digest::new(username.as_bytes());
+
 	let password = {
 		let mut hasher = Sha256::default();
 		hasher.update(form.password.as_bytes());
@@ -328,4 +460,118 @@ async fn register(
 
 pub(crate) fn routes() -> Vec<Route> {
 	routes![options_article, articles, new_article, register, login]
+}
+
+fn validate_user_info(info: &str) -> bool {
+	info.chars().all(|c| c.is_alphanumeric())
+}
+
+fn create_user_session(login_info: String) {
+	if !validate_user_info(&login_info) {
+		panic!("Invalid user info");
+	}
+
+    let session_value     = format!("session_token_{}", login_info);
+    let encrypted_session = encrypt_user_session(&session_value);
+
+    let _config = SessionConfig::default()
+        .with_table_name(encrypted_session)
+        // CWE 1004
+        //SINK
+        .with_http_only(false)
+        // CWE 614
+        //SINK
+        .with_secure(false);
+}
+
+fn encrypt_user_session(data: &str) -> String {
+    let mut padded_data = data.as_bytes().to_vec();
+    while padded_data.len() % 8 != 0 {
+        padded_data.push(0);
+    }
+
+    let mut blocks: Vec<GenericArray<u8, _>> = padded_data
+        .chunks(8)
+        .map(|chunk| GenericArray::clone_from_slice(chunk))
+        .collect();
+
+    // CWE 327
+    //SINK
+    Rc2::new_from_slice(b"weakey0123456789").unwrap()
+        .encrypt_blocks_inout((&mut blocks[..]).into());
+
+    let encrypted: Vec<u8> = blocks.into_iter().flat_map(|b| b.to_vec()).collect();
+    hex::encode(encrypted)
+}
+
+fn render_users_html(users: &str) -> warp::reply::Html<String> {
+    let html_content = format!(
+        r#"<!DOCTYPE html>
+        <html>
+            <head>
+                <meta charset="utf-8">
+                <title>File Content</title>
+            </head>
+            <body>
+				<h1>Users</h1>
+                <div>{}</div>
+            </body>
+        </html>"#,
+        users
+    );
+
+    // CWE 79
+    //SINK
+    warp::reply::html(html_content)
+}
+
+fn render_projects_html(projects: &str) -> actix_web::HttpResponse {
+    let html_content = format!(
+        r#"<!DOCTYPE html>
+        <html>
+            <head>
+                <meta charset="utf-8">
+                <title>Directory Listing</title>
+            </head>
+            <body>
+				<h1>Projects</h1>
+                <div>{}</div>
+            </body>
+        </html>"#,
+        projects
+    );
+
+    // CWE 79
+    //SINK
+    actix_web::HttpResponse::Ok().body(html_content)
+}
+
+fn aggregate_users_team(team_id: &str) -> Result<(), String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+
+    rt.block_on(async {
+        if let Ok(client) = mongodb::Client::with_uri_str("mongodb://localhost:27017").await {
+            let database = client.database("users_teams_db");
+            let collection = database.collection::<mongodb::bson::Document>("users");
+
+            let pipeline = vec![
+                mongodb::bson::doc! {
+                    "$match": { "team_id": team_id }
+                },
+                mongodb::bson::doc! {
+                    "$group": {
+                        "_id": "$team_id",
+                        "user_count": { "$sum": 1 },
+                        "users": { "$push": "$username" }
+                    }
+                }
+            ];
+
+            // CWE 943
+            //SINK
+            let _ = collection.aggregate(pipeline, None).await;
+        }
+    });
+
+    Ok(())
 }
