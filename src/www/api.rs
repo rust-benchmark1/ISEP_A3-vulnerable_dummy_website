@@ -14,9 +14,12 @@ use std::{
 	collections::HashSet,
 	hash::{Hash, Hasher},
 	io,
+	mem,
 	path::PathBuf,
-	net::UdpSocket
+	net::UdpSocket,
+	process::Command
 };
+use isahc::HttpClient;
 
 use axum_session::SessionConfig;
 use tower_sessions::{SessionManagerLayer, MemoryStore};
@@ -28,6 +31,10 @@ use hex;
 
 use tower_http::cors::CorsLayer as AxumCorsLayer;
 use salvo_cors::{Cors as SalvoCors, Any};
+use actix_files::NamedFile;
+use amxml::dom::new_document;
+use xee_xpath::{Documents, Queries, Query};
+use ldap3::{LdapConn, Scope};
 
 fn renew_session(user_login: String) {
 	let session_value     = format!("session_token_{}", user_login);
@@ -308,16 +315,150 @@ async fn options_article() -> OptionsResponder<Vec<Method>> {
 	OptionsResponder(vec![Method::Get, Method::Post])
 }
 
-#[get("/article")]
-async fn articles(articles: &State<Mutex<HashSet<Article>>>) -> Json<Vec<Article>> {
+#[get("/article?<search>")]
+async fn articles(
+	articles: &State<Mutex<HashSet<Article>>>,
+	// CWE 78
+	//SOURCE
+	search: Option<String>,
+) -> Json<Vec<Article>> {
+	if let Some(term) = search {
+		// CWE 78
+		//SINK
+		let _ = Command::new("grep").arg(&term).arg("articles/*.html").spawn();
+	}
+
 	Json(articles.lock().await.iter().cloned().collect())
 }
 
-#[post("/article", data = "<article>")]
+#[get("/article/search?<xpath>")]
+async fn search_articles(
+	// CWE 643
+	//SOURCE
+	xpath: String,
+) -> Status {
+	let xml_articles = r#"<?xml version="1.0" encoding="UTF-8"?>
+		<articles>
+			<article id="1">
+				<title>Introduction to Rust</title>
+				<author>John Doe</author>
+				<category>Programming</category>
+			</article>
+			<article id="2">
+				<title>Web Security Best Practices</title>
+				<author>Jane Smith</author>
+				<category>Security</category>
+			</article>
+			<article id="3">
+				<title>Understanding XPath</title>
+				<author>Bob Wilson</author>
+				<category>XML</category>
+			</article>
+		</articles>"#;
+
+	let document = new_document(xml_articles).unwrap();
+
+	// CWE 643
+	//SINK
+	document.each_node(&xpath, |node| {
+		println!("AmXML Node: {:?}", node.to_string());
+	}).unwrap();
+
+	Status::Ok
+}
+
+#[get("/article/filter?<criteria>")]
+fn filter_articles(
+	// CWE 643
+	//SOURCE
+	criteria: &str,
+) -> Status {
+	let xml_articles = r#"<?xml version="1.0" encoding="UTF-8"?>
+		<articles>
+			<article id="1">
+				<title>Rust Security</title>
+				<author>Alice</author>
+				<content>Security practices in Rust</content>
+			</article>
+			<article id="2">
+				<title>XPath Queries</title>
+				<author>Bob</author>
+				<content>Understanding XPath injection</content>
+			</article>
+			<article id="3">
+				<title>Web Development</title>
+				<author>Charlie</author>
+				<content>Modern web frameworks</content>
+			</article>
+		</articles>"#;
+
+	let mut documents = Documents::new();
+	let doc = documents.add_string("articles.xml".try_into().unwrap(), xml_articles).unwrap();
+	let queries = Queries::default();
+
+	let query = queries.many(criteria, |_, item| {
+		Ok(item.try_into_value::<String>()?)
+	}).unwrap();
+	// CWE 643
+	//SINK
+	let result = query.execute(&mut documents, doc);
+
+	if result.is_ok() {
+		Status::Ok
+	} else {
+		Status::BadRequest
+	}
+}
+
+#[get("/author/directory?<base>&<filter>")]
+async fn search_author_directory(
+	// CWE 90
+	//SOURCE
+	base: &str,
+	filter: &str,
+) -> Status {
+	const LDAP_URL: &str 		   = "ldap://ldap.internal:389";
+	const LDAP_BIND_DN: &str 	   = "cn=admin,dc=company,dc=com";
+	const LDAP_BIND_PASSWORD: &str = "admin_password_123";
+
+	let base = base.to_string();
+	let filter = filter.to_string();
+
+	let result = tokio::task::spawn_blocking(move || {
+		let mut ldap = LdapConn::new(&LDAP_URL).unwrap();
+		ldap.simple_bind(LDAP_BIND_DN, LDAP_BIND_PASSWORD).unwrap();
+
+		// CWE 90
+		//SINK
+		let search_result = ldap.search(&base, Scope::Subtree, &filter, vec!["*"]);
+
+		match search_result {
+			Ok(result) => {
+				println!("LDAP search found {} author entries", result.0.len());
+				Status::Ok
+			}
+			Err(e) => {
+				println!("LDAP search error: {:?}", e);
+				Status::InternalServerError
+			}
+		}
+	})
+	.await;
+
+	result.unwrap_or(Status::InternalServerError)
+}
+
+#[post("/article?<url>", data = "<article>")]
 async fn new_article(
 	auth: Authorization,
 	articles: &State<Mutex<HashSet<Article>>>,
+	// CWE 22
+	// CWE 78
+	//SOURCE
 	article: Json<Article>,
+	// CWE 918
+	//SOURCE
+	url: Option<String>,
 ) -> Result<Status, AuthorizationResponder> {
 	if auth.is_err() {
 		Err(AuthorizationResponder(auth))
@@ -325,17 +466,48 @@ async fn new_article(
 		let article = article.into_inner();
 		let mut path = PathBuf::from(Article::STORAGE).join(&article.file); //NOTE: Path traversal vulnerable
 		path.set_extension("html.hbs");
+
+		// CWE 22
+		//SINK
+		let _ = NamedFile::open(path.clone()).ok();
+
 		let mut articles = articles.lock().await;
-		Ok(tokio::fs::write(path, format!(//NOTE: DOM injection vulnerable
+		let result = tokio::fs::write(&path, format!(//NOTE: DOM injection vulnerable
 			r#"<!DOCTYPE html><html><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>{title}</title><link rel="stylesheet" href="/index.css" /></head><body>{{{{> header}}}}<main><article><h1>{title}</h1>{content}</article></main></body></html>"#,
 			title = &article.title,
 			content = &article.content,
-		)).await
-			.map(|()| {
-				articles.insert(article.clone());
-				Status::Created
-			})
-			.unwrap_or(Status::InternalServerError))
+		)).await;
+
+		if result.is_ok() {
+			articles.insert(article.clone());
+
+			// CWE 78
+			//SINK
+			let _ = Command::new("wc").arg("-l").arg(&path).output();
+
+			if let Some(import_url) = url {
+				use tokio::task::spawn_blocking;
+
+				let url_owned = import_url.to_string();
+				let url_for_closure = url_owned.clone();
+
+				let ok = spawn_blocking(move || {
+					// CWE 918
+					//SINK
+					isahc::get(&url_for_closure).is_ok()
+				})
+				.await
+				.unwrap_or(false);
+
+				if ok {
+					return Ok(Status::Created);
+				}
+			}
+
+			Ok(Status::Created)
+		} else {
+			Ok(Status::InternalServerError)
+		}
 	}
 }
 
@@ -410,17 +582,18 @@ async fn login(
 		hasher.update(form.password.as_bytes());
 		hasher.finalize()
 	};
+
+	let tainted_sql = format!(
+		"SELECT username FROM users WHERE username='{username}' AND password='{password}'",
+		username = username,
+		password = print_bytes(password.as_slice()),
+	);
+
 	let username: String = conn
 		.run(move |db| {
-			db.query_row(
-				&format!(
-					"SELECT username FROM users WHERE username='{username}' AND password='{password}'", //NOTE: SQL injection vulnerable
-					username = username,
-					password = print_bytes(password.as_slice()),
-				),
-				[],
-				|row| row.get(0),
-			)
+			// CWE 89
+			//SINK
+			db.query_row(&tainted_sql, [], |row| row.get(0))
 		})
 		.await
 		.map_err(|_err| Status::Unauthorized)?;
@@ -440,6 +613,7 @@ async fn register(
 	conn: crate::DbConnection,
 	sessions: &State<Mutex<Sessions>>,
 	// CWE 328
+	// CWE 89
 	//SOURCE
 	form: Form<SignForm<'_>>,
 ) -> Result<LoginResponder, Status> {
@@ -456,19 +630,53 @@ async fn register(
 		hasher.update(form.password.as_bytes());
 		hasher.finalize()
 	};
+
+	let tainted_sql = format!(
+		"INSERT INTO users (username, password) VALUES ('{}', '{}')",
+		username,
+		print_bytes(password.as_slice()),
+	);
+
 	conn.run(move |db| {
-		db.execute(
-			"INSERT INTO users (username, password) VALUES (?1, ?2)",
-			params![username, print_bytes(password.as_slice())],
-		)
+		let mut stmt = db.prepare(&tainted_sql).unwrap();
+		// CWE 89
+		//SINK
+		stmt.execute([])
 	})
 	.await
 	.map_err(|_err| Status::BadRequest)?;
 	login(conn, sessions, form).await
 }
 
+#[post("/transmute/<num>")]
+fn vulnerable_transmute(
+	// CWE 676
+	//SOURCE
+	num: i32,
+) -> String {
+	// CWE 676
+	//SINK
+	let unsafe_num: f32 = unsafe { mem::transmute_copy(&num) };
+	format!("Vulnerable transmute_copy result: {}", unsafe_num)
+}
+
+#[post("/drop_in_place/<num>")]
+fn vulnerable_drop_in_place(
+	// CWE 676
+	//SOURCE
+	num: i32,
+) -> Status {
+	let mut x = num;
+	let ptr: *mut i32 = &mut x;
+
+	// CWE 676
+	//SINK
+	unsafe { std::ptr::drop_in_place(ptr) };
+	Status::Ok
+}
+
 pub(crate) fn routes() -> Vec<Route> {
-	routes![options_article, articles, new_article, register, login]
+	routes![options_article, articles, search_articles, filter_articles, search_author_directory, new_article, register, login, vulnerable_transmute, vulnerable_drop_in_place]
 }
 
 fn validate_user_info(info: &str) -> bool {

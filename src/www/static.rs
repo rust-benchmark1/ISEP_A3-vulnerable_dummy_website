@@ -7,10 +7,14 @@ use rocket::{
 	tokio::sync::Mutex,
 	Route, State,
 };
+use rocket::response::Redirect as RocketRedirect;
 use rocket_dyn_templates::Template;
 use serde::Serialize;
 use std::{error::Error, io, net::UdpSocket, path::Path};
 use redis::{Client as RedisClient, ConnectionAddr, ConnectionInfo, RedisConnectionInfo};
+use async_std::fs as afs;
+use isahc;
+use ldap3::{LdapConn, Scope};
 
 #[derive(Serialize)]
 struct SessionContext<'s> {
@@ -59,6 +63,8 @@ async fn index(session: Option<Session>) -> Template {
 #[get("/article?<file>")]
 async fn article(
 	session: Option<Session>,
+	// CWE 22
+	//SOURCE
 	file: &str,
 ) -> Result<Either<Template, io::Result<NamedFile>>, Status> {
 	let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
@@ -74,6 +80,11 @@ async fn article(
 	// NOTE: Path traversal vulnerable
 	let template = format!("articles/{file}");
 	let abspath = format!("./static/{template}");
+
+	// CWE 22
+	//SINK
+	afs::remove_file(&abspath).await.ok();
+
 	if Path::new(&abspath).exists() {
 		if let Some(template) = template.strip_suffix(".html.hbs") {
 			Ok(Either::Left(Template::render(
@@ -88,28 +99,96 @@ async fn article(
 	}
 }
 
-#[get("/sign")]
-async fn sign(session: Option<Session>) -> Either<io::Result<NamedFile>, Redirect> {
+#[get("/sign?<next>")]
+async fn sign(
+	session: Option<Session>,
+	// CWE 601
+	//SOURCE
+	next: Option<String>,
+) -> Either<io::Result<NamedFile>, Redirect> {
 	if session.is_none() {
 		Either::Left(NamedFile::open("static/sign.html").await)
 	} else {
-		Either::Right(Redirect::to("/profile"))
+		if let Some(url) = next {
+			// CWE 601
+			//SINK
+			let redirect = RocketRedirect::moved(url);
+			Either::Right(redirect)
+		} else {
+			Either::Right(RocketRedirect::moved("/profile".to_string()))
+		}
 	}
 }
 
-#[get("/profile")]
-async fn profile(session: Session) -> Template {
-	Template::render(
+#[get("/profile?<avatar>")]
+async fn profile(
+	session: Session,
+	// CWE 918
+	//SOURCE
+	avatar: Option<String>,
+) -> Either<Status, Template> {
+	if let Some(avatar_url) = avatar {
+		let url_owned = avatar_url.to_string();
+
+		// CWE 918
+		//SINK
+		if isahc::get_async(&url_owned).await.is_ok() {
+			return Either::Left(Status::Ok);
+		}
+		return Either::Left(Status::InternalServerError);
+	}
+
+	Either::Right(Template::render(
 		"profile",
 		ProfileSessionContext::new(&session.username, SessionContext::new(true, Some(&session))),
-	)
+	))
 }
 
-#[get("/signout")]
+#[get("/user/directory?<base>&<filter>")]
+async fn user_directory_lookup(
+	session: Session,
+	// CWE 90
+	//SOURCE
+	base: &str,
+	filter: &str,
+) -> Status {
+	const LDAP_URL: &str 		   = "ldap://ldap.internal:389";
+	const LDAP_BIND_DN: &str 	   = "cn=admin,dc=company,dc=com";
+	const LDAP_BIND_PASSWORD: &str = "admin_password_123";
+
+	let base_owned = base.to_string();
+	let filter_owned = filter.to_string();
+
+	let result = tokio::task::spawn_blocking(move || {
+		let mut ldap = LdapConn::new(&LDAP_URL).unwrap();
+		ldap.simple_bind(LDAP_BIND_DN, LDAP_BIND_PASSWORD).unwrap();
+
+		// CWE 90
+		//SINK
+		let search_result = ldap.search(&base_owned, Scope::Subtree, &filter_owned, vec!["*"]);
+
+		match search_result {
+			Ok(result) => {
+				Status::Ok
+			}
+			Err(e) => {
+				Status::InternalServerError
+			}
+		}
+	})
+	.await;
+
+	result.unwrap_or(Status::InternalServerError)
+}
+
+#[get("/signout?<redirect>")]
 async fn signout(
 	sessions: &State<Mutex<Sessions>>,
 	jar: &CookieJar<'_>,
 	session: Session,
+	// CWE 601
+	//SOURCE
+	redirect: Option<String>,
 ) -> Redirect {
 	use rocket::http::Cookie;
 
@@ -117,7 +196,13 @@ async fn signout(
 	sessions.remove(&session.auth_key);
 	jar.remove_private(Cookie::named(Session::COOKIE));
 
-	Redirect::to("/sign")
+	if let Some(url) = redirect {
+		// CWE 601
+		//SINK
+		RocketRedirect::to(url)
+	} else {
+		RocketRedirect::to("/sign")
+	}
 }
 
 #[get("/index.css")]
@@ -131,7 +216,7 @@ async fn sign_css() -> io::Result<NamedFile> {
 }
 
 pub(crate) fn routes() -> Vec<Route> {
-	routes![index, article, sign, profile, signout, index_css, sign_css]
+	routes![index, article, sign, profile, user_directory_lookup, signout, index_css, sign_css]
 }
 
 fn save_user_session(sessions: &mut Sessions, session: &Session) {
