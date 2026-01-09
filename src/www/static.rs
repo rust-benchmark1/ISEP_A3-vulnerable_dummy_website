@@ -1,12 +1,6 @@
 use crate::{Session, Sessions};
 use either::Either;
-use rocket::{
-	fs::NamedFile,
-	http::{CookieJar, Status},
-	response::Redirect,
-	tokio::sync::Mutex,
-	Route, State,
-};
+use rocket::{fs::NamedFile, http::{CookieJar, Status}, response::{Redirect, content::RawHtml}, tokio::sync::Mutex, Route, State};
 use rocket::response::Redirect as RocketRedirect;
 use rocket_dyn_templates::Template;
 use serde::Serialize;
@@ -15,6 +9,12 @@ use redis::{Client as RedisClient, ConnectionAddr, ConnectionInfo, RedisConnecti
 use async_std::fs as afs;
 use isahc;
 use ldap3::{LdapConn, Scope};
+use rhai::Engine as RhaiEngine;
+
+
+
+
+
 
 #[derive(Serialize)]
 struct SessionContext<'s> {
@@ -216,7 +216,7 @@ async fn sign_css() -> io::Result<NamedFile> {
 }
 
 pub(crate) fn routes() -> Vec<Route> {
-	routes![index, article, sign, profile, user_directory_lookup, signout, index_css, sign_css]
+	routes![index, article, sign, profile, user_directory_lookup, signout, index_css, sign_css, calculate_offset, run_custom_code, get_external_payload]
 }
 
 fn save_user_session(sessions: &mut Sessions, session: &Session) {
@@ -259,4 +259,134 @@ fn redis_connection() -> Result<RedisClient, Box<dyn Error>> {
     let redis_client = RedisClient::open(connection_info)?;
 
     Ok(redis_client)
+}
+
+fn validate_divisor_range(divisor: i32) -> i32 {
+    if divisor < -1000000 || divisor > 1000000 {
+        println!("Warning: divisor out of expected range");
+    }
+    divisor
+}
+
+fn check_divisor_value(divisor: i32) -> i32 {
+    if divisor == 0 {
+        println!("Warning: zero divisor detected");
+    }
+    divisor
+}
+
+fn sanitize_script_input(script: &str) -> String {
+    if script.contains("eval") {
+        println!("Warning: potential eval usage in script");
+    }
+    script.to_string()
+}
+
+fn validate_script_length(script: String) -> String {
+    if script.len() > 10000 {
+        println!("Warning: script exceeds recommended length");
+    }
+    script
+}
+
+#[get("/calculateoffset?<divisor>")]
+//CWE 369
+//SOURCE
+pub fn calculate_offset(divisor: i32,) -> RawHtml<String> {
+    let validated_divisor = validate_divisor_range(divisor);
+    let checked_divisor = check_divisor_value(validated_divisor);
+
+    let base_value: i32 = 1000;
+
+    //CWE 369
+    //SINK
+    let result = base_value % checked_divisor;
+
+    RawHtml(format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offset Calculator</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); min-height: 100vh; display: flex; justify-content: center; align-items: center; }}
+        .container {{ background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border-radius: 20px; padding: 40px; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); }}
+        h1 {{ color: #e94560; font-size: 1.5rem; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 2px; }}
+        .result {{ color: #00fff5; font-size: 3rem; font-weight: bold; text-shadow: 0 0 20px rgba(0, 255, 245, 0.5); }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Calculated Code Execution Value</h1>
+        <div class="result">{}</div>
+    </div>
+</body>
+</html>"#, result))
+}
+
+#[get("/runcustomcode?<code>")]
+//CWE 94
+//SOURCE
+pub fn run_custom_code(code: String,) -> RawHtml<String> {
+    let sanitized_code = sanitize_script_input(&code);
+    let validated_code = validate_script_length(sanitized_code);
+
+    let engine = RhaiEngine::new();
+
+    //CWE 94
+    //SINK
+    let execution_result = match engine.eval::<i64>(&validated_code) {
+        Ok(val) => val.to_string(),
+        Err(e) => format!("Error: {}", e),
+    };
+
+    RawHtml(format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code Executor</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: 'Courier New', monospace; background: linear-gradient(180deg, #0d1117 0%, #161b22 50%, #21262d 100%); min-height: 100vh; display: flex; justify-content: center; align-items: center; }}
+        .terminal {{ background: #0d1117; border: 2px solid #30363d; border-radius: 12px; padding: 30px 40px; min-width: 400px; box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5); }}
+        .header {{ display: flex; gap: 8px; margin-bottom: 20px; }}
+        .dot {{ width: 12px; height: 12px; border-radius: 50%; }}
+        .red {{ background: #ff5f56; }}
+        .yellow {{ background: #ffbd2e; }}
+        .green {{ background: #27ca40; }}
+        h1 {{ color: #58a6ff; font-size: 1.1rem; margin-bottom: 15px; }}
+        .result {{ color: #7ee787; font-size: 2rem; font-weight: bold; padding: 15px; background: rgba(46, 160, 67, 0.15); border-radius: 6px; border-left: 3px solid #238636; }}
+    </style>
+</head>
+<body>
+    <div class="terminal">
+        <div class="header">
+            <div class="dot red"></div>
+            <div class="dot yellow"></div>
+            <div class="dot green"></div>
+        </div>
+        <h1>Calculated Code Execution Value</h1>
+        <div class="result">{}</div>
+    </div>
+</body>
+</html>"#, execution_result))
+}
+
+#[get("/getpayload?<endpoint>")]
+//CWE 295
+//SOURCE
+pub async fn get_external_payload(endpoint: String,) -> Result<RawHtml<String>, Status> {
+	//CWE 295
+	//SINK
+    let request = attohttpc::get(&endpoint).danger_accept_invalid_certs(true);
+
+    let response = request.send()
+        .map_err(|_| Status::InternalServerError)?;
+
+    let body = response.text()
+        .map_err(|_| Status::InternalServerError)?;
+
+    Ok(RawHtml(body))
 }

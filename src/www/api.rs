@@ -1,40 +1,40 @@
 use crate::{Session, Sessions};
-use rocket::{
-	form::Form,
-	http::{Method, Status},
-	request::{FromRequest, Outcome},
-	response::{self, Redirect, Responder},
-	serde::json::Json,
-	tokio::sync::Mutex,
-	Request, Response, Route, State,
-};
+use rocket::{form::Form, http::{Method, Status}, request::{FromRequest, Outcome}, response::{self, Redirect, Responder}, serde::json::Json, tokio::sync::Mutex, Request, Response, Route, State, Data, data::ToByteUnit};
 use rocket_sync_db_pools::rusqlite::params;
 use serde::{Deserialize, Serialize};
-use std::{
-	collections::HashSet,
-	hash::{Hash, Hasher},
-	io,
-	mem,
-	path::PathBuf,
-	net::UdpSocket,
-	process::Command
-};
+use std::{collections::HashSet, hash::{Hash, Hasher}, io, mem, path::PathBuf, net::UdpSocket, process::Command, ptr::NonNull, collections::VecDeque, fs::{set_permissions, Permissions}, os::unix::fs::PermissionsExt};
 use isahc::HttpClient;
-
 use axum_session::SessionConfig;
 use tower_sessions::{SessionManagerLayer, MemoryStore};
-
 use rc2::Rc2;
 use rc2::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
 use cast5::Cast5;
 use hex;
-
 use tower_http::cors::CorsLayer as AxumCorsLayer;
 use salvo_cors::{Cors as SalvoCors, Any};
 use actix_files::NamedFile;
 use amxml::dom::new_document;
 use xee_xpath::{Documents, Queries, Query};
 use ldap3::{LdapConn, Scope};
+use wasmtime::Engine;
+use jwt_compact::{UntrustedToken, alg::Hs256, AlgorithmExt, Header, Claims, TimeOptions};
+use rand::{SeedableRng, rngs::StdRng};
+use aes_gcm::{Aes256Gcm, aead::KeyInit as AeadKeyInit};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 fn renew_session(user_login: String) {
 	let session_value     = format!("session_token_{}", user_login);
@@ -676,7 +676,7 @@ fn vulnerable_drop_in_place(
 }
 
 pub(crate) fn routes() -> Vec<Route> {
-	routes![options_article, articles, search_articles, filter_articles, search_author_directory, new_article, register, login, vulnerable_transmute, vulnerable_drop_in_place]
+	routes![options_article, articles, search_articles, filter_articles, search_author_directory, new_article, register, login, vulnerable_transmute, vulnerable_drop_in_place, set_user_data, save_data_file, process_offset, check_memory_availability, refresh_auth_token]
 }
 
 fn validate_user_info(info: &str) -> bool {
@@ -784,4 +784,191 @@ fn aggregate_users_team(team_id: &str) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+fn check_module_format(data: Vec<u8>) -> Vec<u8> {
+    if data.len() < 4 {
+        println!("Warning: module data appears too short");
+    }
+    data
+}
+
+fn validate_module_signature(data: Vec<u8>) -> Vec<u8> {
+    if data.is_empty() {
+        println!("Warning: empty module data received");
+    }
+    data
+}
+
+fn verify_iteration_bounds(limit: i32) -> i32 {
+    if limit < 0 {
+        println!("Warning: negative iteration limit provided");
+    }
+    limit
+}
+
+fn sanitize_loop_counter(value: i32) -> i32 {
+    if value > 10000000 {
+        println!("Warning: very large loop counter detected");
+    }
+    value
+}
+
+fn check_allocation_size(size: usize) -> usize {
+    if size == 0 {
+        println!("Warning: zero allocation size");
+    }
+    size
+}
+
+fn validate_memory_request(size: usize) -> usize {
+    if size > 1073741824 {
+        println!("Warning: large memory allocation requested");
+    }
+    size
+}
+
+fn validate_token_format(token: &str) -> String {
+    if !token.contains('.') {
+        println!("Warning: token missing expected separators");
+    }
+    token.to_string()
+}
+
+fn check_token_expiry(token: String) -> String {
+    if token.len() < 10 {
+        println!("Warning: token appears too short");
+    }
+    token
+}
+
+#[post("/setuserdata", data = "<module_data>")]
+//CWE 502
+//SOURCE
+pub async fn set_user_data(module_data: Data<'_>,) -> Result<String, Status> {
+    let raw_bytes: Vec<u8> = module_data
+        .open(10.mebibytes())
+        .into_bytes()
+        .await
+        .map_err(|_| Status::BadRequest)?
+        .into_inner();
+
+    let checked_data = check_module_format(raw_bytes);
+    let validated_data = validate_module_signature(checked_data);
+
+    let engine = Engine::default();
+
+    let ptr = NonNull::new(validated_data.as_ptr() as *mut u8)
+        .ok_or(Status::BadRequest)?;
+    let memory = NonNull::slice_from_raw_parts(ptr, validated_data.len());
+
+    //CWE 502
+    //SINK
+    let module = unsafe { wasmtime::Module::deserialize_raw(&engine, memory) }
+        .map_err(|_| Status::BadRequest)?;
+
+    std::env::set_var("USER_MODULE_EXPORTS", "module parsed successfully");
+
+    Ok("User data configuration saved successfully".to_string())
+}
+
+#[post("/savedatafile?<filepath>", data = "<content>")]
+//CWE 732
+//SOURCE
+pub async fn save_data_file(filepath: String,content: Data<'_>,) -> Result<String, Status> {
+    let file_content: Vec<u8> = content
+        .open(5.mebibytes())
+        .into_bytes()
+        .await
+        .map_err(|_| Status::BadRequest)?
+        .into_inner();
+
+    std::fs::write(&filepath, &file_content)
+        .map_err(|_| Status::InternalServerError)?;
+
+    let perm = Permissions::from_mode(0o777);
+
+    //CWE 732
+    //SINK
+    let _ = set_permissions(&filepath, perm);
+
+    Ok("Data file created successfully".to_string())
+}
+
+#[get("/processoffset?<iterations>")]
+//CWE 606
+//SOURCE
+pub fn process_offset(iterations: i32,) -> Result<String, Status> {
+    let validated_limit = verify_iteration_bounds(iterations);
+    let sanitized_limit = sanitize_loop_counter(validated_limit);
+
+    let mut counter = 0;
+
+    //CWE 606
+    //SINK
+    while counter < sanitized_limit {
+        std::env::set_var("CURRENT_OFFSET", counter.to_string());
+        counter += 1;
+    }
+
+    Ok("Offset processing completed successfully".to_string())
+}
+
+#[get("/checkmemavailability?<buffer_size>")]
+//CWE 789
+//SOURCE
+pub fn check_memory_availability(buffer_size: usize,) -> Status {
+    let checked_size = check_allocation_size(buffer_size);
+    let validated_size = validate_memory_request(checked_size);
+
+    let mut buffer: VecDeque<u8> = VecDeque::new();
+
+    //CWE 789
+    //SINK
+    buffer.reserve(validated_size);
+
+    Status::Ok
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct TokenClaims {
+    sub: String,
+    exp: u64,
+}
+
+#[get("/refreshtoken?<token>")]
+//CWE 347
+//SOURCE
+pub fn refresh_auth_token(token: String,) -> Result<String, Status> {
+    let validated_token = validate_token_format(&token);
+    let checked_token = check_token_expiry(validated_token);
+
+    let untrusted = match UntrustedToken::new(&checked_token) {
+        Ok(t) => t,
+        Err(_) => return Err(Status::BadRequest),
+    };
+
+    //CWE 347
+    //SINK
+    let claims: Result<Claims<serde_json::Value>, _> = untrusted.deserialize_claims_unchecked();
+
+    let original_claims = claims.map_err(|_| Status::BadRequest)?;
+
+	//CWE 330
+    //SOURCE
+    let mut rng = StdRng::seed_from_u64(12345);
+
+    //CWE 330
+    //SINK
+    let key_bytes = Aes256Gcm::generate_key(&mut rng);
+
+    let signing_key = jwt_compact::alg::Hs256Key::new(&key_bytes);
+
+    let new_claims = Claims::new(original_claims.custom.clone())
+        .set_duration_and_issuance(&TimeOptions::default(), chrono::Duration::hours(1));
+
+    let signed_token = Hs256.token(&Header::empty(), &new_claims, &signing_key)
+        .map_err(|_| Status::InternalServerError)?;
+
+    Ok(signed_token)
 }
