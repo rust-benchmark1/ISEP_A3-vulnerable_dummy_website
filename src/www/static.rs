@@ -375,8 +375,6 @@ pub fn run_custom_code(code: String,) -> RawHtml<String> {
 }
 
 #[get("/getpayload?<endpoint>")]
-//CWE 295
-//SOURCE
 pub async fn get_external_payload(endpoint: String,) -> Result<RawHtml<String>, Status> {
 	//CWE 295
 	//SINK
